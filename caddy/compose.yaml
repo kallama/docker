@@ -1,0 +1,49 @@
+services:
+  caddy:
+    # build:
+      # context: .
+      # args:
+        # CADDY_VERSION: 2.10.0
+      # dockerfile: Dockerfile
+    image: serfriz/caddy-cloudflare-ddns-crowdsec-geoip-security:2.10.0
+    container_name: caddy
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - CLOUDFLARE_EMAIL=${CF_EMAIL}
+      - CLOUDFLARE_API_TOKEN=${CF_API_TOKEN}
+      - ACME_AGREE=true
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./config:/config
+      - ./data:/data
+      - ./logs:/var/log/caddy
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./geoip:/geoip:ro
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - caddy
+
+  geoipupdate:
+    image: maxmindinc/geoipupdate:v7.1.1
+    container_name: geoipupdate
+    volumes:
+      - ./geoip:/usr/share/GeoIP
+    environment:
+      GEOIPUPDATE_EDITION_IDS: GeoLite2-Country
+      GEOIPUPDATE_FREQUENCY: "12"
+    env_file:
+      - .env
+    security_opt:
+      - no-new-privileges=true
+    networks:
+      - caddy
+    restart: unless-stopped
+
+networks:
+  caddy:
+    external: true
