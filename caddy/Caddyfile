@@ -1,0 +1,168 @@
+# Global
+{
+	admin 127.0.0.1:2019
+
+	servers {
+		trusted_proxies cloudflare {
+			interval 12h
+			timeout 15s
+		}
+	}
+
+	crowdsec {
+		api_url http://crowdsec-crowdsec-1:8080
+		api_key {$CROWDSEC_API_KEY}
+		ticker_interval 5s
+	}
+
+	order authenticate before respond
+	order crowdsec before authenticate
+	order authorize before basicauth
+
+	security {
+		oauth identity provider pocket_id {
+			realm pocket_id
+			driver generic
+			client_id {$POCKET_ID}
+			client_secret {$POCKET_SECRET}
+			scopes openid email profile groups
+			base_auth_url https://id.{$DOMAIN}/authorize
+			metadata_url https://id.{$DOMAIN}/.well-known/openid-configuration
+			delay_start 5
+		}
+
+		authentication portal pocket_id_portal {
+			crypto default token lifetime 86400
+			enable identity provider pocket_id
+		}
+
+		authorization policy public_access {
+			set auth url /caddy-security/oauth2/pocket_id
+			allow roles public
+			inject headers with claims
+		}
+
+		authorization policy private_access {
+			set auth url /caddy-security/oauth2/pocket_id
+			allow roles private
+			inject headers with claims
+		}
+	}
+
+	dynamic_dns {
+		provider cloudflare {$CF_API_TOKEN}
+		domains {
+			{$DOMAIN} home
+		}
+		ip_source simple_http https://icanhazip.com
+		ip_source simple_http https://api64.ipify.org
+		check_interval 1h
+		versions ipv4
+		ttl 1h
+	}
+}
+
+#Snippets
+
+(logging) {
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10MiB
+			roll_keep 0
+		}
+	}
+}
+
+(internal) {
+	@internal_only not remote_ip private_ranges
+	abort @internal_only
+}
+
+(geoip) {
+	@geofilter {
+		not maxmind_geolocation {
+			db_path "/geoip/GeoLite2-Country.mmdb"
+			allow_countries US CA
+		}
+		not remote_ip private_ranges
+	}
+	respond @geofilter "Blocked" 403
+}
+
+(public_policy) {
+	@auth {
+		path /caddy-security/*
+	}
+	route @auth {
+		authenticate with pocket_id_portal
+	}
+	route /* {
+		authorize with public_access
+	}
+}
+
+(private_policy) {
+	@auth {
+		path /caddy-security/*
+	}
+	route @auth {
+		authenticate with pocket_id_portal
+	}
+	route /* {
+		authorize with private_access
+	}
+}
+
+(tinyauth_forwarder) {
+	forward_auth tinyauth-tinyauth-1:3000 {
+		uri /api/auth/caddy
+	}
+}
+
+# Sites
+
+*.{$DOMAIN} {
+	encode gzip
+	import logging
+
+	tls {
+		dns cloudflare {$CF_API_TOKEN}
+		propagation_delay 2m
+		resolvers 1.1.1.1 1.0.0.1
+	}
+
+	route {
+		import geoip
+		crowdsec
+
+		@pocket-id host id.{$DOMAIN}
+		handle @pocket-id {
+			reverse_proxy http://pocket-id-pocket-id-1:1411
+		}
+
+		@tinyauth host tinyauth.{$DOMAIN}
+		handle @tinyauth {
+			reverse_proxy http://tinyauth-tinyauth-1:3000
+		}
+
+		@whoami host whoami.{$DOMAIN}
+		handle @whoami {
+			import internal
+			reverse_proxy http://whoami-whoami-1:80
+		}
+
+		@whoami2 host whoami2.{$DOMAIN}
+		handle @whoami2 {
+			import public_policy
+			reverse_proxy http://whoami2-whoami-1:80
+		}
+	}
+}
+
+:80, :443 {
+	@healthcheck {
+		path /health
+	}
+	respond @healthcheck 200
+	respond "Unknown host" 403
+}
